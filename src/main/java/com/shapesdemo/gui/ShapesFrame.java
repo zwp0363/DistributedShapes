@@ -11,6 +11,7 @@ import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ShapesFrame extends JFrame {
@@ -23,29 +24,41 @@ public class ShapesFrame extends JFrame {
     private ServerSocket serverSocket;
     private Shape selectedShape;
     private List<ClientHandler> clients;
+    private final String clientId;
+    private JLabel delayLabel;
+    private static final String DELAY_FORMAT = "同步延迟: %d ms";
 
     public ShapesFrame(boolean isServer, String host, int port) {
         this.isServer = isServer;
         this.clients = new CopyOnWriteArrayList<>();
+        this.clientId = UUID.randomUUID().toString();
+        
         setTitle(isServer ? "Shapes Demo - Server" : "Shapes Demo - Client");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-
+        
         // Initialize components
         shapesPanel = new ShapesPanel();
         controlPanel = createControlPanel();
-
+        
+        // 添加延迟显示标签
+        delayLabel = new JLabel(String.format(DELAY_FORMAT, 0));
+        delayLabel.setForeground(Color.BLUE);
+        delayLabel.setFont(new Font("Arial", Font.BOLD, 14));
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        topPanel.add(delayLabel);
+        
         // Layout
         setLayout(new BorderLayout());
+        add(topPanel, BorderLayout.NORTH);
         add(shapesPanel, BorderLayout.CENTER);
         add(controlPanel, BorderLayout.EAST);
-
+        
         pack();
         setLocationRelativeTo(null);
-
+        
         // Setup network
         setupNetwork(host, port);
 
-        // 添加窗口关闭事件处理
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent windowEvent) {
@@ -198,13 +211,13 @@ public class ShapesFrame extends JFrame {
         try {
             if (isServer) {
                 // 服务器向所有客户端广播
-                ShapeMessage message = new ShapeMessage(shape, action);
+                ShapeMessage message = new ShapeMessage(shape, action, clientId);
                 for (ClientHandler client : clients) {
                     client.sendMessage(message);
                 }
             } else if (out != null) {
                 // 客户端发送到服务器
-                out.writeObject(new ShapeMessage(shape, action));
+                out.writeObject(new ShapeMessage(shape, action, clientId));
                 out.reset();
                 out.flush();
             }
@@ -230,6 +243,13 @@ public class ShapesFrame extends JFrame {
     private void handleMessage(ShapeMessage message) {
         SwingUtilities.invokeLater(() -> {
             try {
+                // 计算延迟（只对UPDATE消息计算）
+                if ("UPDATE".equals(message.getAction()) && 
+                    !clientId.equals(message.getSenderId())) {
+                    long delay = System.currentTimeMillis() - message.getTimestamp();
+                    updateDelayLabel(delay);
+                }
+
                 Shape receivedShape = message.getShape();
                 switch (message.getAction()) {
                     case "ADD":
@@ -250,6 +270,18 @@ public class ShapesFrame extends JFrame {
                 e.printStackTrace();
             }
         });
+    }
+
+    private void updateDelayLabel(long delay) {
+        delayLabel.setText(String.format(DELAY_FORMAT, delay));
+        // 根据延迟值改变颜色
+        if (delay < 50) {
+            delayLabel.setForeground(Color.GREEN);
+        } else if (delay < 100) {
+            delayLabel.setForeground(Color.BLUE);
+        } else {
+            delayLabel.setForeground(Color.RED);
+        }
     }
 
     // 内部类：处理客户端连接
