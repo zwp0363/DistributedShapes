@@ -10,6 +10,8 @@ import java.awt.*;
 import java.io.*;
 import java.net.*;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ShapesFrame extends JFrame {
     private ShapesPanel shapesPanel;
@@ -20,9 +22,11 @@ public class ShapesFrame extends JFrame {
     private boolean isServer;
     private ServerSocket serverSocket;
     private Shape selectedShape;
+    private List<ClientHandler> clients;
 
     public ShapesFrame(boolean isServer, String host, int port) {
         this.isServer = isServer;
+        this.clients = new CopyOnWriteArrayList<>();
         setTitle(isServer ? "Shapes Demo - Server" : "Shapes Demo - Client");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 
@@ -40,6 +44,33 @@ public class ShapesFrame extends JFrame {
 
         // Setup network
         setupNetwork(host, port);
+
+        // 添加窗口关闭事件处理
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent windowEvent) {
+                cleanup();
+            }
+        });
+    }
+
+    private void cleanup() {
+        try {
+            if (isServer) {
+                for (ClientHandler client : clients) {
+                    client.close();
+                }
+                if (serverSocket != null && !serverSocket.isClosed()) {
+                    serverSocket.close();
+                }
+            } else {
+                if (socket != null && !socket.isClosed()) {
+                    socket.close();
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     private JPanel createControlPanel() {
@@ -128,12 +159,19 @@ public class ShapesFrame extends JFrame {
         try {
             if (isServer) {
                 serverSocket = new ServerSocket(port);
+                // 启动服务器监听线程
                 new Thread(() -> {
-                    try {
-                        socket = serverSocket.accept();
-                        setupStreams();
-                    } catch (IOException e) {
-                        e.printStackTrace();
+                    while (!serverSocket.isClosed()) {
+                        try {
+                            Socket clientSocket = serverSocket.accept();
+                            ClientHandler clientHandler = new ClientHandler(clientSocket);
+                            clients.add(clientHandler);
+                            new Thread(clientHandler).start();
+                        } catch (IOException e) {
+                            if (!serverSocket.isClosed()) {
+                                e.printStackTrace();
+                            }
+                        }
                     }
                 }).start();
             } else {
@@ -145,37 +183,29 @@ public class ShapesFrame extends JFrame {
         }
     }
 
-    private void setupStreams() {
-        try {
-            out = new ObjectOutputStream(socket.getOutputStream());
-            in = new ObjectInputStream(socket.getInputStream());
+    private void setupStreams() throws IOException {
+        out = new ObjectOutputStream(socket.getOutputStream());
+        in = new ObjectInputStream(socket.getInputStream());
 
-            // Setup shape update listener
-            shapesPanel.setUpdateListener(shape -> sendShape(shape, "UPDATE"));
+        // Setup shape update listener
+        shapesPanel.setUpdateListener(shape -> sendShape(shape, "UPDATE"));
 
-            // Start receiving messages
-            new Thread(this::receiveMessages).start();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+        // Start receiving messages
+        new Thread(this::receiveMessages).start();
     }
 
     private void sendShape(Shape shape, String action) {
         try {
-            if (out != null) {
-                // 确保发送完整的图形状态
-                if (shape != null) {
-                    shape.setX(shape.getX());
-                    shape.setY(shape.getY());
-                    shape.setTargetX(shape.getTargetX());
-                    shape.setTargetY(shape.getTargetY());
-                    shape.setColor(shape.getColor());
-                    shape.setSize(shape.getSize());
-                    shape.setShowTrail(shape.isShowTrail());
-                    shape.setTrailPoints(new ArrayList<>(shape.getTrailPoints()));
+            if (isServer) {
+                // 服务器向所有客户端广播
+                ShapeMessage message = new ShapeMessage(shape, action);
+                for (ClientHandler client : clients) {
+                    client.sendMessage(message);
                 }
+            } else if (out != null) {
+                // 客户端发送到服务器
                 out.writeObject(new ShapeMessage(shape, action));
-                out.reset(); // 重置对象流状态，确保发送完整对象
+                out.reset();
                 out.flush();
             }
         } catch (IOException e) {
@@ -184,25 +214,94 @@ public class ShapesFrame extends JFrame {
     }
 
     private void receiveMessages() {
-        while (true) {
+        while (socket != null && !socket.isClosed()) {
             try {
                 ShapeMessage message = (ShapeMessage) in.readObject();
-                SwingUtilities.invokeLater(() -> {
-                    switch (message.getAction()) {
-                        case "ADD":
-                            shapesPanel.addShape(message.getShape());
-                            break;
-                        case "UPDATE":
-                            shapesPanel.updateShape(message.getShape());
-                            break;
-                        case "CLEAR_TRAILS":
-                            shapesPanel.clearAllTrails();
-                            break;
-                    }
-                });
+                handleMessage(message);
             } catch (IOException | ClassNotFoundException e) {
-                e.printStackTrace();
+                if (!socket.isClosed()) {
+                    e.printStackTrace();
+                }
                 break;
+            }
+        }
+    }
+
+    private void handleMessage(ShapeMessage message) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                Shape receivedShape = message.getShape();
+                switch (message.getAction()) {
+                    case "ADD":
+                        if (receivedShape != null) {
+                            shapesPanel.addShape(receivedShape);
+                        }
+                        break;
+                    case "UPDATE":
+                        if (receivedShape != null) {
+                            shapesPanel.updateShape(receivedShape);
+                        }
+                        break;
+                    case "CLEAR_TRAILS":
+                        shapesPanel.clearAllTrails();
+                        break;
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+    }
+
+    // 内部类：处理客户端连接
+    private class ClientHandler implements Runnable {
+        private Socket clientSocket;
+        private ObjectOutputStream clientOut;
+        private ObjectInputStream clientIn;
+
+        public ClientHandler(Socket socket) throws IOException {
+            this.clientSocket = socket;
+            this.clientOut = new ObjectOutputStream(socket.getOutputStream());
+            this.clientIn = new ObjectInputStream(socket.getInputStream());
+        }
+
+        @Override
+        public void run() {
+            while (!clientSocket.isClosed()) {
+                try {
+                    ShapeMessage message = (ShapeMessage) clientIn.readObject();
+                    // 处理从客户端收到的消息
+                    handleMessage(message);
+                    // 转发给其他客户端
+                    for (ClientHandler client : clients) {
+                        if (client != this) {
+                            client.sendMessage(message);
+                        }
+                    }
+                } catch (IOException | ClassNotFoundException e) {
+                    if (!clientSocket.isClosed()) {
+                        e.printStackTrace();
+                    }
+                    break;
+                }
+            }
+            clients.remove(this);
+        }
+
+        public void sendMessage(ShapeMessage message) throws IOException {
+            if (!clientSocket.isClosed()) {
+                clientOut.writeObject(message);
+                clientOut.reset();
+                clientOut.flush();
+            }
+        }
+
+        public void close() {
+            try {
+                if (clientSocket != null && !clientSocket.isClosed()) {
+                    clientSocket.close();
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
             }
         }
     }
