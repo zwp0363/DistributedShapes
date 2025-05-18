@@ -6,7 +6,6 @@ import com.shapesdemo.shape.Shape;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -15,21 +14,21 @@ public class ShapesPanel extends JPanel {
     private Shape selectedShape;
     private ShapeUpdateListener updateListener;
     private Timer updateTimer;
-    private Timer animationTimer;  // 新增：动画更新计时器
-    private static final int UPDATE_INTERVAL = 50; // 20 FPS
-    private static final int ANIMATION_INTERVAL = 16; // ~60 FPS
-    private long lastUpdateTime = 0;
-    private static final long THROTTLE_INTERVAL = 50; // 50ms throttling interval
+    private Timer animationTimer;
+    private static final int UPDATE_INTERVAL = 16; // 约60FPS
+    private static final int ANIMATION_INTERVAL = 16;
+    private Point lastMousePoint;
 
     public ShapesPanel() {
         setPreferredSize(new Dimension(800, 600));
         setBackground(Color.WHITE);
-
+        
         // 鼠标事件处理
         MouseAdapter mouseHandler = new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
                 selectShapeAt(e.getX(), e.getY());
+                lastMousePoint = e.getPoint();
             }
 
             @Override
@@ -37,52 +36,46 @@ public class ShapesPanel extends JPanel {
                 if (selectedShape != null && updateListener != null) {
                     updateListener.onShapeUpdated(selectedShape);
                 }
-                lastUpdateTime = 0; // 重置节流计时器
+                selectedShape = null;
+                lastMousePoint = null;
             }
 
             @Override
             public void mouseDragged(MouseEvent e) {
                 if (selectedShape != null) {
-                    selectedShape.move(e.getX(), e.getY());
-
-                    // 添加消息节流逻辑
-                    long currentTime = System.currentTimeMillis();
-                    if (currentTime - lastUpdateTime >= THROTTLE_INTERVAL) {
-                        if (updateListener != null) {
-                            updateListener.onShapeUpdated(selectedShape);
-                        }
-                        lastUpdateTime = currentTime;
+                    // 计算移动增量
+                    int dx = e.getX() - lastMousePoint.x;
+                    int dy = e.getY() - lastMousePoint.y;
+                    
+                    // 更新图形位置
+                    selectedShape.setX(selectedShape.getX() + dx);
+                    selectedShape.setY(selectedShape.getY() + dy);
+                    selectedShape.setTargetX(selectedShape.getX());
+                    selectedShape.setTargetY(selectedShape.getY());
+                    
+                    // 更新最后的鼠标位置
+                    lastMousePoint = e.getPoint();
+                    
+                    // 立即发送更新
+                    if (updateListener != null) {
+                        updateListener.onShapeUpdated(selectedShape);
                     }
-
+                    
                     repaint();
                 }
             }
         };
-
+        
         addMouseListener(mouseHandler);
         addMouseMotionListener(mouseHandler);
 
-        // 创建动画更新计时器
-        animationTimer = new Timer(ANIMATION_INTERVAL, e -> {
-            boolean needsRepaint = false;
-            for (Shape shape : shapes) {
-                shape.updatePosition();
-                needsRepaint = true;
-            }
-            if (needsRepaint) {
-                repaint();
-            }
-        });
-        animationTimer.start();
-
-        // 创建定时器用于定期更新
+        // 创建更新定时器
         updateTimer = new Timer(UPDATE_INTERVAL, e -> repaint());
         updateTimer.start();
     }
 
     private void selectShapeAt(int x, int y) {
         Shape selected = null;
-        // 从后向前检查，以便选择最上层的图形
         for (int i = shapes.size() - 1; i >= 0; i--) {
             Shape shape = shapes.get(i);
             if (isPointInShape(x, y, shape)) {
@@ -104,10 +97,9 @@ public class ShapesPanel extends JPanel {
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
         Graphics2D g2d = (Graphics2D) g;
-
-        // 启用抗锯齿
-        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
-                RenderingHints.VALUE_ANTIALIAS_ON);
+        
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, 
+                            RenderingHints.VALUE_ANTIALIAS_ON);
 
         // 绘制所有图形的轨迹
         for (Shape shape : shapes) {
@@ -117,16 +109,14 @@ public class ShapesPanel extends JPanel {
         // 绘制所有图形
         for (Shape shape : shapes) {
             shape.draw(g2d);
-        }
-
-        // 绘制选中图形的边框
-        if (selectedShape != null) {
-            g2d.setColor(Color.RED);
-            g2d.setStroke(new BasicStroke(2));
-            int size = selectedShape.getSize();
-            g2d.drawRect(selectedShape.getX() - size/2,
-                    selectedShape.getY() - size/2,
-                    size, size);
+            if (shape == selectedShape) {
+                g2d.setColor(Color.RED);
+                g2d.setStroke(new BasicStroke(2));
+                int size = shape.getSize();
+                g2d.drawRect(shape.getX() - size/2, 
+                            shape.getY() - size/2, 
+                            size, size);
+            }
         }
     }
 
@@ -139,9 +129,18 @@ public class ShapesPanel extends JPanel {
         for (int i = 0; i < shapes.size(); i++) {
             Shape shape = shapes.get(i);
             if (shape.equals(updatedShape)) {
-                // 更新目标位置而不是直接设置位置
-                shape.setTargetX(updatedShape.getTargetX());
-                shape.setTargetY(updatedShape.getTargetY());
+                // 直接更新位置和状态
+                shape.setX(updatedShape.getX());
+                shape.setY(updatedShape.getY());
+                shape.setTargetX(updatedShape.getX());
+                shape.setTargetY(updatedShape.getY());
+                shape.setShowTrail(updatedShape.isShowTrail());
+                
+                // 更新轨迹
+                if (updatedShape.isShowTrail()) {
+                    shape.setTrailPoints(updatedShape.getTrailPoints());
+                }
+                
                 if (selectedShape != null && selectedShape.equals(shape)) {
                     selectedShape = shape;
                 }
@@ -167,9 +166,6 @@ public class ShapesPanel extends JPanel {
         super.removeNotify();
         if (updateTimer != null) {
             updateTimer.stop();
-        }
-        if (animationTimer != null) {
-            animationTimer.stop();
         }
     }
 
